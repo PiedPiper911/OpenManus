@@ -1,3 +1,4 @@
+import json
 import math
 from typing import Dict, List, Optional, Union
 
@@ -634,6 +635,59 @@ class LLM:
             logger.error(f"Unexpected error in ask_with_images: {e}")
             raise
 
+    def _fit_tools_to_budget(
+        self, tools: List[dict], messages: List[dict], messages_tokens: int
+    ) -> List[dict]:
+        """
+        Truncate tool descriptions to fit within token budget.
+
+        When tool definitions are too long and would cause the total input to exceed
+        max_input_tokens, this method truncates descriptions proportionally while
+        preserving tool names and parameter schemas (essential for function calling).
+
+        Args:
+            tools: List of tool definitions
+            messages: Formatted messages
+            messages_tokens: Token count for messages
+
+        Returns:
+            List[dict]: Tools with potentially truncated descriptions
+        """
+        # Calculate available tokens for tools
+        available_tokens = self.max_input_tokens - messages_tokens
+        if available_tokens <= 0:
+            # Messages alone exceed limit; return tools as-is and let the error propagate
+            return tools
+
+        # Calculate current tool tokens
+        tool_tokens = sum(self.count_tokens(str(tool)) for tool in tools)
+
+        if tool_tokens <= available_tokens:
+            return tools
+
+        # Need to truncate - calculate truncation ratio
+        ratio = available_tokens / tool_tokens
+        logger.warning(
+            f"Tool descriptions ({tool_tokens} tokens) exceed budget "
+            f"({available_tokens} tokens). Truncating with ratio {ratio:.2f}"
+        )
+
+        truncated_tools = []
+        for tool in tools:
+            tool_copy = json.loads(json.dumps(tool))  # Deep copy
+            if "function" in tool_copy and "description" in tool_copy["function"]:
+                desc = tool_copy["function"]["description"]
+                desc_tokens = self.count_tokens(desc)
+                max_desc_tokens = max(20, int(desc_tokens * ratio))
+                encoded = self.tokenizer.encode(desc)
+                if len(encoded) > max_desc_tokens:
+                    truncated_desc = self.tokenizer.decode(encoded[:max_desc_tokens])
+                    truncated_desc += "..."
+                    tool_copy["function"]["description"] = truncated_desc
+            truncated_tools.append(tool_copy)
+
+        return truncated_tools
+
     @retry(
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
@@ -709,6 +763,10 @@ class LLM:
                 for tool in tools:
                     if not isinstance(tool, dict) or "type" not in tool:
                         raise ValueError("Each tool must be a dict with 'type' field")
+
+            # Truncate tool descriptions if they exceed token budget
+            if tools and self.max_input_tokens:
+                tools = self._fit_tools_to_budget(tools, messages, input_tokens)
 
             # Set up the completion request
             params = {
