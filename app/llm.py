@@ -406,7 +406,9 @@ class LLM:
                     # Remove tool_calls from this assistant message
                     msg = {k: v for k, v in msg.items() if k != "tool_calls"}
                     if not msg.get("content"):
-                        msg["content"] = "[Tool calls were removed due to missing responses]"
+                        msg[
+                            "content"
+                        ] = "[Tool calls were removed due to missing responses]"
 
             result.append(msg)
 
